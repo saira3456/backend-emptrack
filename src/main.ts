@@ -4,9 +4,8 @@ import { AppModule } from './app.module';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   
-  // Enable CORS
   app.enableCors({
-    origin: 'http://localhost:3001', // Your Next.js frontend URL
+    origin: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001', 
     credentials: true,
   });
   
