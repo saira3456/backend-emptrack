@@ -12,25 +12,11 @@ export class ProjectService {
     
     // Use connection string if available, otherwise individual params
     if (process.env.DATABASE_URL) {
-      // Parse the connection string to check if SSL is already specified
-      const hasSSLParam = process.env.DATABASE_URL.includes('sslmode=');
-      
-      if (!hasSSLParam && isProduction) {
-        // If no SSL param in production, add it
-        const separator = process.env.DATABASE_URL.includes('?') ? '&' : '?';
-        const connectionString = `${process.env.DATABASE_URL}${separator}sslmode=require`;
-        
-        this.pool = new Pool({
-          connectionString,
-          ssl: { rejectUnauthorized: false },
-        });
-      } else {
-        // Use connection string as-is
-        this.pool = new Pool({
-          connectionString: process.env.DATABASE_URL,
-          ssl: isProduction ? { rejectUnauthorized: false } : false,
-        });
-      }
+      // Using connection string (recommended for Vercel/Neon)
+      this.pool = new Pool({
+        connectionString: process.env.DATABASE_URL,
+        ssl: isProduction ? { rejectUnauthorized: false } : false,
+      });
     } else {
       // Using individual connection parameters
       this.pool = new Pool({
@@ -55,7 +41,6 @@ export class ProjectService {
     } catch (error) {
       console.error('❌ Database connection failed in ProjectService:', error.message);
       console.error('🔧 Please check your database configuration and SSL settings');
-      console.error('📝 DATABASE_URL:', process.env.DATABASE_URL ? 'Set (hidden for security)' : 'Not set');
     }
   }
 

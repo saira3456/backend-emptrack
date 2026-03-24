@@ -7,10 +7,12 @@ import { LeaveController } from './controllers/leave.controller';
 import { LeaveService } from './services/leave.service';
 import { ProjectService } from './services/project.service';
 import { ProjectController } from './controllers/project.controller';
+import { AttendanceController } from './controllers/attendance.controller';
+import { AttendanceService } from './services/attendance.service';
 
 @Module({
-  controllers: [EmployeeController, DepartmentController, LeaveController,ProjectController],
-  providers: [EmployeeService, DepartmentService,LeaveService, ProjectService],
-  exports: [EmployeeService, DepartmentService,LeaveService,ProjectService]
+  controllers: [EmployeeController, DepartmentController, LeaveController,ProjectController, AttendanceController],
+  providers: [EmployeeService, DepartmentService,LeaveService, ProjectService, AttendanceService],
+  exports: [EmployeeService, DepartmentService,LeaveService,ProjectService, AttendanceService]
 })
 export class EmployeeModule { }
