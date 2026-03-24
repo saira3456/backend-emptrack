@@ -7,13 +7,56 @@ export class ProjectService {
   private pool: Pool;
 
   constructor() {
-    this.pool = new Pool({
-      host: process.env.DB_HOST || 'localhost',
-      port: 5432,
-      user: process.env.DB_USERNAME || 'postgres',
-      password: process.env.DB_PASSWORD || 'postgres',
-      database: process.env.DB_NAME || 'emptrack',
-    });
+    // Determine if we're in production (Vercel)
+    const isProduction = process.env.NODE_ENV === 'production';
+    
+    // Use connection string if available, otherwise individual params
+    if (process.env.DATABASE_URL) {
+      // Parse the connection string to check if SSL is already specified
+      const hasSSLParam = process.env.DATABASE_URL.includes('sslmode=');
+      
+      if (!hasSSLParam && isProduction) {
+        // If no SSL param in production, add it
+        const separator = process.env.DATABASE_URL.includes('?') ? '&' : '?';
+        const connectionString = `${process.env.DATABASE_URL}${separator}sslmode=require`;
+        
+        this.pool = new Pool({
+          connectionString,
+          ssl: { rejectUnauthorized: false },
+        });
+      } else {
+        // Use connection string as-is
+        this.pool = new Pool({
+          connectionString: process.env.DATABASE_URL,
+          ssl: isProduction ? { rejectUnauthorized: false } : false,
+        });
+      }
+    } else {
+      // Using individual connection parameters
+      this.pool = new Pool({
+        host: process.env.DB_HOST || 'localhost',
+        port: parseInt(process.env.DB_PORT || '5432'),
+        user: process.env.DB_USER || process.env.DB_USERNAME || 'postgres',
+        password: process.env.DB_PASSWORD || 'postgres',
+        database: process.env.DB_NAME || 'emptrack',
+        ssl: isProduction ? { rejectUnauthorized: false } : false,
+      });
+    }
+
+    // Test connection on startup
+    this.testConnection();
+  }
+
+  private async testConnection() {
+    try {
+      const client = await this.pool.connect();
+      console.log('✅ Database connected successfully in ProjectService');
+      client.release();
+    } catch (error) {
+      console.error('❌ Database connection failed in ProjectService:', error.message);
+      console.error('🔧 Please check your database configuration and SSL settings');
+      console.error('📝 DATABASE_URL:', process.env.DATABASE_URL ? 'Set (hidden for security)' : 'Not set');
+    }
   }
 
   // ========== PROJECT CRUD ==========
