@@ -1,214 +1,467 @@
-// backend/src/employee/services/attendance.service.ts
 import { Injectable } from '@nestjs/common';
-import { Pool } from 'pg';
-import { CreateAttendanceDto, UpdateAttendanceDto, DailyAttendanceResponse } from '../dto/create-attendance.dto';
+import { pool } from '../../db';
 
 @Injectable()
 export class AttendanceService {
-  private pool: Pool;
 
-  constructor() {
-    const isProduction = process.env.NODE_ENV === 'production';
-    
-    if (process.env.DATABASE_URL) {
-      this.pool = new Pool({
-        connectionString: process.env.DATABASE_URL,
-        ssl: isProduction ? { rejectUnauthorized: false } : false,
-      });
-    } else {
-      this.pool = new Pool({
-        host: process.env.DB_HOST || 'localhost',
-        port: parseInt(process.env.DB_PORT || '5432'),
-        user: process.env.DB_USER || 'postgres',
-        password: process.env.DB_PASSWORD || 'postgres',
-        database: process.env.DB_NAME || 'emptrack',
-      });
+  async getAttendanceByDate(date: string) {
+    try {
+      console.log('Fetching attendance for date:', date);
+      
+      const query = `
+        SELECT 
+          e.id as employee_id,
+          e.name,
+          e.email,
+          e.position,
+          d.name as department_name,
+          a.id as attendance_id,
+          a.status,
+          a.check_in,
+          a.check_out,
+          a.overtime_hours,
+          a.date
+        FROM employees e
+        LEFT JOIN departments d ON e.department_id = d.id
+        LEFT JOIN attendance a ON e.id = a.employee_id AND a.date = $1::DATE
+        WHERE e.status = 'active'
+        ORDER BY e.name
+      `;
+      
+      const result = await pool.query(query, [date]);
+      console.log(`Found ${result.rows.length} employee records`);
+      
+      return result.rows.map(row => ({
+        employee: {
+          id: row.employee_id,
+          name: row.name,
+          email: row.email,
+          position: row.position,
+          department: row.department_name || 'Unknown',
+        },
+        attendance: row.status ? {
+          id: row.attendance_id,
+          status: row.status,
+          checkIn: row.check_in,
+          checkOut: row.check_out,
+          overtimeHours: parseFloat(row.overtime_hours) || 0,
+          date: row.date,
+        } : null,
+      }));
+    } catch (error) {
+      console.error('Error fetching attendance by date:', error);
+      throw new Error(`Failed to fetch attendance: ${error.message}`);
     }
   }
 
-  async getAttendanceByDate(date: string): Promise<DailyAttendanceResponse[]> {
-    const query = `
-      SELECT 
-        e.id as employee_id,
-        e.name,
-        e.email,
-        e.position,
-        d.name as department,
-        a.id as attendance_id,
-        a.date,
-        a.status,
-        a.check_in,
-        a.check_out,
-        a.overtime_hours,
-        a.created_at,
-        a.updated_at
-      FROM employees e
-      LEFT JOIN departments d ON e.department_id = d.id
-      LEFT JOIN attendance a ON e.id = a.employee_id AND a.date = $1
-      WHERE e.status = 'active'
-      ORDER BY e.name
-    `;
+  async markAttendance(data: {
+    employeeId: number;
+    date: string;
+    status: string;
+    checkIn?: string;
+    checkOut?: string;
+  }) {
+    console.log('Marking attendance with data:', { ...data });
     
-    const result = await this.pool.query(query, [date]);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      
+      // First check if employee exists
+      const employeeCheck = await client.query(
+        'SELECT id FROM employees WHERE id = $1 AND status = $2',
+        [data.employeeId, 'active']
+      );
+      
+      if (employeeCheck.rows.length === 0) {
+        throw new Error(`Employee with ID ${data.employeeId} not found or not active`);
+      }
+      
+      // Check if attendance already exists
+      const checkQuery = `
+        SELECT id, check_in FROM attendance 
+        WHERE employee_id = $1 AND date = $2::DATE
+      `;
+      
+      const existing = await client.query(checkQuery, [data.employeeId, data.date]);
+      console.log('Existing attendance:', existing.rows[0]);
+      
+      let result;
+      
+      if (existing.rows.length > 0) {
+        // Update existing attendance
+        const updateQuery = `
+          UPDATE attendance 
+          SET status = $1
+          WHERE employee_id = $2 AND date = $3::DATE
+          RETURNING id, employee_id, date, status, check_in, check_out, overtime_hours
+        `;
+        
+        result = await client.query(updateQuery, [
+          data.status,
+          data.employeeId,
+          data.date
+        ]);
+        
+        console.log('Updated existing attendance:', result.rows[0]);
+      } else {
+        // Insert new attendance
+        let checkInValue: Date | null = null;
+        if (data.status === 'present') {
+          checkInValue = new Date();
+        }
+        
+        const insertQuery = `
+          INSERT INTO attendance (
+            employee_id, 
+            date, 
+            status, 
+            check_in,
+            overtime_hours
+          )
+          VALUES ($1, $2::DATE, $3, $4, $5)
+          RETURNING id, employee_id, date, status, check_in, check_out, overtime_hours
+        `;
+        
+        result = await client.query(insertQuery, [
+          data.employeeId,
+          data.date,
+          data.status,
+          checkInValue,
+          0
+        ]);
+        
+        console.log('Inserted new attendance:', result.rows[0]);
+      }
+      
+      await client.query('COMMIT');
+      
+      const attendance = result.rows[0];
+      
+      return {
+        id: attendance.id,
+        employeeId: attendance.employee_id,
+        date: attendance.date,
+        status: attendance.status,
+        checkIn: attendance.check_in,
+        checkOut: attendance.check_out,
+        overtimeHours: parseFloat(attendance.overtime_hours) || 0,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('Error marking attendance:', error);
+      throw new Error(`Failed to mark attendance: ${error.message}`);
+    } finally {
+      client.release();
+    }
+  }
+
+  async bulkMarkAttendance(date: string, status: string) {
+    console.log('Bulk marking attendance:', { date, status });
     
-    return result.rows.map(row => ({
-      employee: {
-        id: row.employee_id,
-        name: row.name,
-        email: row.email,
-        position: row.position,
-        department: row.department || 'N/A'
-      },
-      attendance: row.attendance_id ? {
-        id: row.attendance_id,
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      
+      let checkInValue: Date | null = null;
+      if (status === 'present') {
+        checkInValue = new Date();
+      }
+      
+      const query = `
+        INSERT INTO attendance (employee_id, date, status, check_in, overtime_hours)
+        SELECT 
+          e.id, 
+          $1::DATE, 
+          $2,
+          $3,
+          0
+        FROM employees e
+        WHERE e.status = 'active'
+        ON CONFLICT (employee_id, date) 
+        DO UPDATE SET 
+          status = EXCLUDED.status
+        RETURNING id, employee_id, date, status, check_in, check_out, overtime_hours
+      `;
+      
+      const result = await client.query(query, [date, status, checkInValue]);
+      console.log(`Bulk marked ${result.rows.length} employees`);
+      
+      await client.query('COMMIT');
+      
+      return result.rows.map(row => ({
+        id: row.id,
         employeeId: row.employee_id,
         date: row.date,
         status: row.status,
         checkIn: row.check_in,
         checkOut: row.check_out,
-        overtimeHours: row.overtime_hours || 0,
-        createdAt: row.created_at,
-        updatedAt: row.updated_at
-      } : null
-    }));
+        overtimeHours: parseFloat(row.overtime_hours) || 0,
+      }));
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('Error bulk marking attendance:', error);
+      throw new Error(`Failed to bulk mark attendance: ${error.message}`);
+    } finally {
+      client.release();
+    }
   }
 
-  async markAttendance(createDto: CreateAttendanceDto): Promise<any> {
-    const query = `
-      INSERT INTO attendance (employee_id, date, status, check_in, check_out, overtime_hours)
-      VALUES ($1, $2, $3, $4, $5, $6)
-      ON CONFLICT (employee_id, date) 
-      DO UPDATE SET 
-        status = EXCLUDED.status,
-        check_in = COALESCE(EXCLUDED.check_in, attendance.check_in),
-        check_out = COALESCE(EXCLUDED.check_out, attendance.check_out),
-        overtime_hours = EXCLUDED.overtime_hours,
-        updated_at = NOW()
-      RETURNING id, employee_id as "employeeId", date, status, check_in as "checkIn", check_out as "checkOut", overtime_hours as "overtimeHours"
-    `;
-    
-    const result = await this.pool.query(query, [
-      createDto.employeeId,
-      createDto.date,
-      createDto.status,
-      createDto.checkIn || null,
-      createDto.checkOut || null,
-      createDto.overtimeHours || 0
-    ]);
-    
-    return result.rows[0];
-  }
-
-  async bulkMarkAttendance(date: string, status: string): Promise<{ success: boolean; count: number }> {
-    const employees = await this.pool.query(
-      'SELECT id FROM employees WHERE status = $1',
-      ['active']
-    );
-    
-    const results: any[] = []; // Explicitly type the array
-    for (const emp of employees.rows) {
-      const result = await this.markAttendance({
-        employeeId: emp.id,
+  async getAttendanceSummary(date: string) {
+    try {
+      const query = `
+        SELECT 
+          COUNT(DISTINCT e.id) as total_employees,
+          COUNT(CASE WHEN a.status = 'present' THEN 1 END) as present,
+          COUNT(CASE WHEN a.status = 'absent' THEN 1 END) as absent,
+          COUNT(CASE WHEN a.status = 'late' THEN 1 END) as late,
+          COUNT(CASE WHEN a.status = 'half_day' THEN 1 END) as half_day,
+          COUNT(CASE WHEN a.status IS NULL THEN 1 END) as not_marked,
+          ROUND(COUNT(CASE WHEN a.status = 'present' THEN 1 END)::DECIMAL / NULLIF(COUNT(DISTINCT e.id), 0) * 100, 2) as attendance_rate
+        FROM employees e
+        LEFT JOIN attendance a ON e.id = a.employee_id AND a.date = $1::DATE
+        WHERE e.status = 'active'
+      `;
+      
+      const result = await pool.query(query, [date]);
+      
+      const summary = result.rows[0];
+      
+      return {
         date,
-        status: status as any
-      });
-      results.push(result);
+        totalEmployees: parseInt(summary.total_employees),
+        present: parseInt(summary.present),
+        absent: parseInt(summary.absent),
+        late: parseInt(summary.late),
+        halfDay: parseInt(summary.half_day),
+        notMarked: parseInt(summary.not_marked),
+        attendanceRate: parseFloat(summary.attendance_rate) || 0,
+      };
+    } catch (error) {
+      console.error('Error fetching attendance summary:', error);
+      throw new Error(`Failed to fetch attendance summary: ${error.message}`);
     }
-    
-    return { success: true, count: results.length };
   }
 
-  async updateAttendance(id: number, updateDto: UpdateAttendanceDto): Promise<any> {
-    const fields: string[] = [];
-    const values: any[] = [];
-    let paramIndex = 1;
-    
-    if (updateDto.status !== undefined) {
-      fields.push(`status = $${paramIndex++}`);
-      values.push(updateDto.status);
+  async getAttendanceSummaryRange(startDate: string, endDate: string) {
+    try {
+      const query = `
+        SELECT 
+          a.date,
+          COUNT(DISTINCT e.id) as total_employees,
+          COUNT(CASE WHEN a.status = 'present' THEN 1 END) as present,
+          COUNT(CASE WHEN a.status = 'absent' THEN 1 END) as absent,
+          COUNT(CASE WHEN a.status = 'late' THEN 1 END) as late,
+          COUNT(CASE WHEN a.status = 'half_day' THEN 1 END) as half_day,
+          COUNT(CASE WHEN a.status IS NULL THEN 1 END) as not_marked,
+          ROUND(COUNT(CASE WHEN a.status = 'present' THEN 1 END)::DECIMAL / NULLIF(COUNT(DISTINCT e.id), 0) * 100, 2) as attendance_rate
+        FROM employees e
+        LEFT JOIN attendance a ON e.id = a.employee_id AND a.date BETWEEN $1::DATE AND $2::DATE
+        WHERE e.status = 'active'
+        GROUP BY a.date
+        ORDER BY a.date
+      `;
+      
+      const result = await pool.query(query, [startDate, endDate]);
+      return result.rows;
+    } catch (error) {
+      console.error('Error fetching attendance summary range:', error);
+      throw new Error(`Failed to fetch attendance summary range: ${error.message}`);
     }
-    if (updateDto.checkIn !== undefined) {
-      fields.push(`check_in = $${paramIndex++}`);
-      values.push(updateDto.checkIn);
-    }
-    if (updateDto.checkOut !== undefined) {
-      fields.push(`check_out = $${paramIndex++}`);
-      values.push(updateDto.checkOut);
-    }
-    if (updateDto.overtimeHours !== undefined) {
-      fields.push(`overtime_hours = $${paramIndex++}`);
-      values.push(updateDto.overtimeHours);
-    }
-    
-    const query = `
-      UPDATE attendance 
-      SET ${fields.join(', ')}, updated_at = NOW()
-      WHERE id = $${paramIndex}
-      RETURNING id, employee_id as "employeeId", date, status, check_in as "checkIn", check_out as "checkOut", overtime_hours as "overtimeHours"
-    `;
-    
-    values.push(id);
-    const result = await this.pool.query(query, values);
-    return result.rows[0];
   }
 
-  async getAttendanceSummary(startDate: string, endDate: string): Promise<any[]> {
-    const query = `
-      SELECT 
-        a.date,
-        COUNT(DISTINCT e.id) as total_employees,
-        COUNT(CASE WHEN a.status = 'present' THEN 1 END) as present,
-        COUNT(CASE WHEN a.status = 'absent' THEN 1 END) as absent,
-        COUNT(CASE WHEN a.status = 'late' THEN 1 END) as late,
-        COUNT(CASE WHEN a.status = 'half_day' THEN 1 END) as half_day,
-        COALESCE(SUM(a.overtime_hours), 0) as total_overtime,
-        ROUND(
-          COUNT(CASE WHEN a.status IN ('present', 'late', 'half_day') THEN 1 END)::numeric / 
-          NULLIF(COUNT(DISTINCT e.id), 0) * 100, 
-          2
-        ) as attendance_rate
-      FROM employees e
-      LEFT JOIN attendance a ON e.id = a.employee_id AND a.date BETWEEN $1 AND $2
-      WHERE e.status = 'active'
-      GROUP BY a.date
-      ORDER BY a.date DESC
-    `;
-    
-    const result = await this.pool.query(query, [startDate, endDate]);
-    return result.rows;
+  async getEmployeeAttendance(employeeId: number, startDate?: string, endDate?: string) {
+    try {
+      let query = `
+        SELECT 
+          id,
+          employee_id,
+          date,
+          status,
+          check_in,
+          check_out,
+          overtime_hours
+        FROM attendance 
+        WHERE employee_id = $1
+      `;
+      
+      const params: any[] = [employeeId];
+      let paramIndex = 2;
+      
+      if (startDate) {
+        query += ` AND date >= $${paramIndex}::DATE`;
+        params.push(startDate);
+        paramIndex++;
+        
+        if (endDate) {
+          query += ` AND date <= $${paramIndex}::DATE`;
+          params.push(endDate);
+          paramIndex++;
+        }
+      }
+      
+      query += ` ORDER BY date DESC`;
+      
+      const result = await pool.query(query, params);
+      
+      return result.rows.map(row => ({
+        id: row.id,
+        employeeId: row.employee_id,
+        date: row.date,
+        status: row.status,
+        checkIn: row.check_in,
+        checkOut: row.check_out,
+        overtimeHours: parseFloat(row.overtime_hours) || 0,
+      }));
+    } catch (error) {
+      console.error('Error fetching employee attendance:', error);
+      throw new Error(`Failed to fetch employee attendance: ${error.message}`);
+    }
   }
 
-  async getEmployeeMonthlyReport(employeeId: number, year: number, month: number): Promise<any> {
-    const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
-    const endDate = `${year}-${String(month).padStart(2, '0')}-${new Date(year, month, 0).getDate()}`;
-    
-    const query = `
-      SELECT 
-        date,
-        status,
-        check_in,
-        check_out,
-        overtime_hours
-      FROM attendance
-      WHERE employee_id = $1 AND date BETWEEN $2 AND $3
-      ORDER BY date
-    `;
-    
-    const result = await this.pool.query(query, [employeeId, startDate, endDate]);
-    
-    const summary = {
-      employeeId,
-      year,
-      month,
-      totalDays: result.rows.length,
-      present: result.rows.filter(r => r.status === 'present').length,
-      absent: result.rows.filter(r => r.status === 'absent').length,
-      late: result.rows.filter(r => r.status === 'late').length,
-      halfDay: result.rows.filter(r => r.status === 'half_day').length,
-      totalOvertime: result.rows.reduce((sum, r) => sum + (r.overtime_hours || 0), 0),
-      records: result.rows
-    };
-    
-    return summary;
+  async updateAttendance(id: number, data: any) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      
+      const updates: string[] = [];
+      const values: any[] = [];
+      let paramCounter = 1;
+      
+      if (data.status) {
+        updates.push(`status = $${paramCounter}`);
+        values.push(data.status);
+        paramCounter++;
+      }
+      
+      if (data.checkIn !== undefined) {
+        updates.push(`check_in = $${paramCounter}`);
+        values.push(data.checkIn);
+        paramCounter++;
+      }
+      
+      if (data.checkOut !== undefined) {
+        updates.push(`check_out = $${paramCounter}`);
+        values.push(data.checkOut);
+        paramCounter++;
+      }
+      
+      if (data.overtimeHours !== undefined) {
+        updates.push(`overtime_hours = $${paramCounter}`);
+        values.push(data.overtimeHours);
+        paramCounter++;
+      }
+      
+      if (updates.length === 0) {
+        throw new Error('No fields to update');
+      }
+      
+      values.push(id);
+      
+      const query = `
+        UPDATE attendance 
+        SET ${updates.join(', ')}
+        WHERE id = $${paramCounter}
+        RETURNING *
+      `;
+      
+      const result = await client.query(query, values);
+      
+      await client.query('COMMIT');
+      
+      if (result.rows.length === 0) {
+        throw new Error('Attendance record not found');
+      }
+      
+      const attendance = result.rows[0];
+      
+      return {
+        id: attendance.id,
+        employeeId: attendance.employee_id,
+        date: attendance.date,
+        status: attendance.status,
+        checkIn: attendance.check_in,
+        checkOut: attendance.check_out,
+        overtimeHours: parseFloat(attendance.overtime_hours) || 0,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('Error updating attendance:', error);
+      throw new Error(`Failed to update attendance: ${error.message}`);
+    } finally {
+      client.release();
+    }
+  }
+
+  async updateCheckInOut(
+    employeeId: number, 
+    date: string, 
+    data: { checkIn?: string; checkOut?: string; overtimeHours?: number }
+  ) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      
+      const updates: string[] = [];
+      const values: any[] = [];
+      let paramCounter = 1;
+      
+      if (data.checkIn) {
+        updates.push(`check_in = $${paramCounter}`);
+        values.push(data.checkIn);
+        paramCounter++;
+      }
+      
+      if (data.checkOut) {
+        updates.push(`check_out = $${paramCounter}`);
+        values.push(data.checkOut);
+        paramCounter++;
+      }
+      
+      if (data.overtimeHours !== undefined) {
+        updates.push(`overtime_hours = $${paramCounter}`);
+        values.push(data.overtimeHours);
+        paramCounter++;
+      }
+      
+      if (updates.length === 0) {
+        throw new Error('No fields to update');
+      }
+      
+      values.push(employeeId, date);
+      
+      const query = `
+        UPDATE attendance 
+        SET ${updates.join(', ')}
+        WHERE employee_id = $${paramCounter} AND date = $${paramCounter + 1}::DATE
+        RETURNING *
+      `;
+      
+      const result = await client.query(query, values);
+      
+      await client.query('COMMIT');
+      
+      if (result.rows.length === 0) {
+        throw new Error('Attendance record not found');
+      }
+      
+      const attendance = result.rows[0];
+      
+      return {
+        id: attendance.id,
+        employeeId: attendance.employee_id,
+        date: attendance.date,
+        status: attendance.status,
+        checkIn: attendance.check_in,
+        checkOut: attendance.check_out,
+        overtimeHours: parseFloat(attendance.overtime_hours) || 0,
+      };
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('Error updating check in/out:', error);
+      throw new Error(`Failed to update check in/out: ${error.message}`);
+    } finally {
+      client.release();
+    }
   }
 }
